@@ -1,0 +1,82 @@
+# 工作流名称：在 Actions 页面显示的名称，可自定义
+name: 股票自动分析&钉钉推送
+
+# 触发条件：1. 手动触发（测试用）；2. 定时触发（周一到周五 18:00 北京时间）
+on:
+  # 手动触发：在 Actions 页面可点击「Run workflow」立即执行
+  workflow_dispatch:
+  # 定时触发：cron 表达式（UTC 时区，北京时间=UTC+8，所以 10:00 UTC = 18:00 北京时间）
+  schedule:
+    - cron: '0 10 * * 1-5'  # 分 时 日 月 周（周一到周五运行，避开周末A股休市）
+
+# 定义工作流任务（一个 job 对应一个虚拟服务器运行环境）
+jobs:
+  # 任务名称：可自定义，这里叫「stock-analysis-job」
+  stock-analysis-job:
+    # 运行环境：选择最新的 Ubuntu 系统（GitHub 推荐，依赖安装稳定）
+    runs-on: ubuntu-latest
+
+    # 任务执行步骤（按顺序从上到下执行）
+    steps:
+      # 步骤 1：将你仓库的代码「检出」到虚拟服务器中（让虚拟服务器能访问你的项目代码）
+      - name: 检出仓库代码
+        uses: actions/checkout@v4  # 这是 GitHub 官方的「检出代码」动作，无需修改
+
+      # 步骤 2：配置 Python 环境（匹配你的项目需求，推荐 3.9+）
+      - name: 配置 Python 3.9 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'  # Python 版本，可根据项目需求修改
+          cache: 'pip'  # 缓存 pip 依赖，加快后续运行速度（不用重复下载）
+
+      # 步骤 3：安装项目所需依赖（包括 Tushare、钉钉推送等）
+      - name: 安装项目依赖
+        run: |
+          # 升级 pip 到最新版本
+          python -m pip install --upgrade pip
+          # 安装项目依赖（用清华镜像加速，避免国内网络超时）
+          pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+          # 额外安装钉钉推送所需依赖（若项目 requirements.txt 中未包含）
+          pip install dingtalkchatbot -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+      # 步骤 4：创建 .env 文件，注入 Tushare Token（从 GitHub Secrets 中读取，避免明文泄露）
+      - name: 注入 Tushare Token 到配置文件
+        run: |
+          # 复制 .env.example 生成 .env 文件（项目需要读取 .env 中的配置）
+          cp .env.example .env
+          # 将 GitHub Secrets 中的 TUSHARE_TOKEN 写入 .env 文件
+          echo "TUSHARE_TOKEN=${{ secrets.TUSHARE_TOKEN }}" >> .env
+
+      # 步骤 5：运行项目，执行股票分析和大盘复盘
+      - name: 执行股票分析与大盘复盘
+        run: |
+          # 运行项目核心脚本（批量分析股票+开启大盘复盘，参数匹配你的项目）
+          python main.py --stocks 301031,300957,002432,300179,300127,002645 --market-review
+          # 可选：查看项目生成的文件（用于调试，确认报告/仪表盘是否生成）
+          ls -l
+
+      # 步骤 6：推送分析结果到钉钉机器人
+      - name: 推送结果到钉钉
+        run: |
+          # 临时创建钉钉推送脚本（无需修改项目代码，直接在虚拟服务器中生成）
+          cat > push_to_dingtalk.py << EOF
+          from dingtalkchatbot.chatbot import DingtalkChatbot
+          import os
+
+          # 从 GitHub Secrets 中读取钉钉 Webhook 地址
+          webhook = "${{ secrets.DINGTALK_WEBHOOK }}"
+          bot = DingtalkChatbot(webhook)
+
+          # 推送大盘复盘文本（优先读取生成的 market_review.txt）
+          try:
+              with open("market_review.txt", "r", encoding="utf-8") as f:
+                  review_content = f.read()
+              bot.send_text(msg=f"【今日大盘复盘（自动推送）】\\n{review_content}", is_at_all=False)
+          except Exception as e:
+              bot.send_text(msg=f"⚠️ 大盘复盘文件读取失败，错误信息：{str(e)}", is_at_all=False)
+
+          # 推送提示信息（告知仪表盘生成情况）
+          bot.send_text(msg=f"✅ 股票分析已完成，决策仪表盘已生成（可查看 GitHub Actions 运行记录获取详情）", is_at_all=False)
+          EOF
+          # 运行刚才创建的钉钉推送脚本
+          python push_to_dingtalk.py
