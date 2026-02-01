@@ -1,0 +1,50 @@
+name: 构建完成钉钉通知
+on:
+  push:
+    branches: [ main, dev ]  # 触发条件：推送到 main/dev 分支时执行
+  workflow_run:
+    workflows: ["任意已有工作流"]  # 也可关联其他工作流，完成后推送通知
+    types: [ completed ]
+
+jobs:
+  dingtalk-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 推送钉钉通知（含完整详情）
+        if: always()  # 无论工作流成功/失败，都推送通知（避免仅成功才推送）
+        run: |
+          # 1. 定义工作流状态（转换为中文，更易读）
+          if [ "${{ job.status }}" = "success" ]; then
+            STATUS="✅ 构建成功"
+          elif [ "${{ job.status }}" = "failure" ]; then
+            STATUS="❌ 构建失败"
+          else
+            STATUS="⏹ 构建取消"
+          fi
+          
+          # 2. 拼接钉钉 markdown 格式消息体（包含完整详情）
+          DING_MESSAGE=$(cat << EOF
+          {
+            "msgtype": "markdown",
+            "markdown": {
+              "title": "GitHub 构建通知",
+              "text": "#### $STATUS \n\n"
+                      "**工作流名称**：${{ github.workflow }}\n\n"
+                      "**分支名称**：${{ github.ref_name }}\n\n"
+                      "**提交 ID**：${{ github.sha }}\n\n"
+                      "**提交信息**：${{ github.event.head_commit.message }}\n\n"
+                      "**提交作者**：${{ github.actor }}\n\n"
+                      "**构建链接**：[点击查看详情](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            },
+            "at": {
+              "isAtAll": false  # 是否@所有人，false 为否
+            }
+          }
+          EOF
+          )
+          
+          # 3. curl 发送 POST 请求到钉钉机器人
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "$DING_MESSAGE" \
+            "${{ secrets.DINGTALK_WEBHOOK }}"
